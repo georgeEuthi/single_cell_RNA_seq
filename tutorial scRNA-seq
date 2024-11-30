@@ -1,0 +1,213 @@
+# Seurat workflow
+library(Seurat)
+library(dplyr)
+library(patchwork)
+library(ggplot2)
+library(gridExtra)
+
+# "C:/Users/gefth/OneDrive/Υπολογιστής/Work/Upwork/Customers/Ali Farhat/scRNAseq/datasets/Nematostella vectensis atlas/
+
+# Human peripheral blood mononuclear cells (PBMCs) are isolated from peripheral blood and identified as any blood 
+# cell with a round nucleus (i.e. lymphocytes, monocytes, natural killer cells (NK cells) or dendritic cells).
+
+# Load the PBMC dataset (https://cf.10xgenomics.com/samples/cell/pbmc3k/pbmc3k_filtered_gene_bc_matrices.tar.gz)
+# there are two ways. 1) Download the .tar.gz file and unzip it two times in order to crate a directory where all three required file
+# exist (mtx, cells, feature) or 2) Download the three prediscribed files containing single cell information from the Gene Expression 
+# Omnibus (GEO) website of NCBI (requirement to know the GEO ascension code e.g. GSM8013286) and use the function ReadMtx().
+# To decompress the files on Linux: tar -xvzf GSM8013286_RAW.tar.gz or tar -xvzf GSM8013286_RAW.tar
+pbmc.data <- Read10X(data.dir = "C:/Users/gefth/OneDrive/Υπολογιστής/Upwork/Customers/Ali Farhat/scRNAseq/code/pbmc3k_filtered_gene_bc_matrices.tar/pbmc3k_filtered_gene_bc_matrices/filtered_gene_bc_matrices/hg19")
+
+# Initialize the Seurat object with the raw non-normalized data to store and manage scRNAseq data.
+# counts = a matrix object with unormalized data (columns = cells / rows = features)
+# min.cells = include features detected in at least n cells
+# min.features = include cells where at least n features are detected
+pbmc <- CreateSeuratObject(counts = pbmc.data, project = "pbmc3k", min.cells = 3, min.features = 200)
+
+# Get additional meta data information
+View(pbmc@meta.data)
+
+# Check the type of you scRNAseq data e.g. DNA or RNA. For example, to run Markers analysis (procedure is shown later)
+# one needs to have a dataset comprised from RNA data
+DefaultAssay(pbmc)
+
+# Check gene names
+head(rownames(pbmc), n = 100) 
+
+# 1a) QC and selecting cells for further analysis
+# e.g. Low-quality cells or empty droplets will often have very few genes while cell doublets or multiplets may exhibit an aberrantly high gene count
+# Low-quality or dying cells often exhibit extensive mitochondrial contamination because these cells can have compromised cell membranes, leading to 
+# leakage of mitochondrial RNA into the cytoplasm (i.e. we check for disproportionately high amount of mitochondrial gene expression).
+# Calculate the percentage of mitochondrial gene expression for each cell by identifying genes that start with "MT-" (prefix for mitochondrial genes) 
+pbmc[["percent.mt"]] <- PercentageFeatureSet(object = pbmc, pattern = "^MT-")
+
+# view the new meta.data column that computes the mitochondrial percentage
+View(pbmc$percent.mt)
+
+# 1b) Visualize the QC metrics to help with the filtering process
+
+# nFeature_RNA = the number of unique genes (features) detected in each cell
+# nCount_RNA = the total number of RNA molecules (or UMI counts) detected in each cell
+VlnPlot(pbmc,features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 3)
+
+# Visualize feature-feature correlation score (Pearson correlation coefficient)
+# plot 1 correlation score = -0.13: that's good since Strong correlations, especially between nCount_RNA and percent.mt, 
+# can indicate biases like high mitochondrial content in cells with low RNA counts, signaling low-quality or dying cells.
+# plot 2 correlation score = 0.95: cells with more RNA generally have more detectable genes
+plot1 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "percent.mt")
+plot2 <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "nFeature_RNA")
+plot1 + plot2
+
+# For the log = T: 
+plot1_log <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "percent.mt", log = TRUE)
+plot2_log <- FeatureScatter(pbmc, feature1 = "nCount_RNA", feature2 = "nFeature_RNA", log = TRUE)
+
+
+# After having a general view of the data set it is time for the actual QC
+# 1. Filter cells that have unique feature counts over 2,500 or less than 200
+# 2. Filter cells that have >5% mitochondrial counts
+pbmc <- subset(pbmc, subset = nFeature_RNA > 200 & nFeature_RNA < 2500 & percent.mt <5)
+
+# 2) After QC and removal of unwanted cells its time for Normalization using LogNormalize() function
+# that normalizes the feature expression measurements for each cell by the total expression and log-transforms
+# This normalization method is widely used in scRNA-seq analysis, global-scaling relies on an assumption 
+# that each cell originally contains the same number of RNA molecules.
+# The result (Normalized values are stored in pbmc[["RNA"]]$data)
+# The parameters normalization.method() and scale.factor() are optional
+pbmc <- NormalizeData(pbmc, normalization.method = "LogNormalize", scale.factor = 10000)
+
+
+# 3) After normalizing based on expression next step is the identification of features that exhibit high cell-to-cell variation
+# (i.e. highly expressed in some cells, and lowly expressed in others) using the function FindVariableFeautres()
+# First find the variables at the object, next find the top variables, then create the general variable plot and finally
+# recreate the variable plot using as points in the same graph the top variable features (in essence the final results of interest here
+# is the plot with the top variable points i.e. gene names)
+
+pbmc <- FindVariableFeatures(pbmc, selection.method = "vst", nfeatures = 2000)
+
+# Find the top 10 and bottom 10 most variable features
+top10 <- head(VariableFeatures(pbmc),10)
+
+# Create a variables plot using the VariabeFeaturePlot() and two subplots marking the top10
+variables_plot <- VariableFeaturePlot(pbmc)
+top10_plot <- LabelPoints(plot = variables_plot, points = top10, repel = TRUE)
+variables_plot + top10_plot
+
+
+# 4) Apply Linear transformation(scaling) using the function ScaleData(), to give equal weight in gene expression, so that 
+# highly-expressed genes do not dominate. This is a standard process prior to dimensional reduction.
+
+# DIFFERENCE BETWEEN NORMALIZATION AND SCALING:
+# Normalization = adjust gene expression values across cells to account for differences in sequencing depth
+# Scaling = adjust each gene's expression values across cells so that they have a mean of 0 and a variance of 1 (equal contribution) 
+
+# Shift the expression of each gene, so that the mean expression across cells is 0, so that PCA will focus on the variation of expression across cells
+# rather than absolute expression levels.
+# Scale the expression of each gene, so that the variance is uniform (=1) across cells, to make a fair comparison and prevent any single gene from 
+# overly influencing the results.
+# The results of this are stored in pbmc[["RNA"]]$scale.data
+# We create the all.genes variable before scaling because...
+all.genes <- rownames(pbmc)
+pbmc <- ScaleData(pbmc, features = all.genes)
+
+
+# 5) On the scaled data perform dimensional reduction using PCA. PCA will only run on the most variable genes (features) to capture the most important 
+# patterns in the data, which is crucial for identifying distinct cell populations.
+pbmc <- RunPCA(pbmc, features = VariableFeatures(object = pbmc))
+
+# Print the top 5 Principal Components (PCs) and show the top 5 genes that contribute the most (both positively and negatively) to that component.
+# Positive: These genes have higher expression levels that drive the direction of the PC in that positive direction.
+# Negative: These genes have lower expression levels drive the direction of the PC in the negative direction.
+print(pbmc[["pca"]],dims=1:5, nfeatures =5)
+
+# Visualize each principal component and the positive-negative contributions of each gene. 
+# The X-Axis has the PC Names while the Y-Axis has the Gene Names.
+# High positive or negative loadings help with the link of PCs to biological processes or cell states
+# e.g. CST3 (Cystatin C, a gene related to various cellular functions.) has high positive loadings on PC_1, it suggests that 
+# variations in this gene are a major contributor to the overall variance captured by PC_1.
+VizDimLoadings(pbmc)
+
+# Visualize the PCA
+DimHeatmap(pbmc, dims = 1:5, cells = 500, balanced = T)
+DimPlot(pbmc)
+
+# 6) Cell clustering. Embed cells in a graph structure - K-nearest neighbor (KNN) graph,with edges drawn between cells with similar feature expression 
+# patterns, and then attempt to partition this graph into highly interconnected ‘communities. In a few words, in this step we aim to use the KNN graphs
+# and subsequent clustering help group cells into clusters based on their similarity. Then Louvain algorithm optimizes the division of cells into clusters, 
+# with the resolution parameter adjusting the number of clusters. The Idents() function then provides the cluster assignments for each cell, which you can use 
+# for further analysis and interpretation.
+
+# 6a) First construct a KNN graph based on the euclidean distance in PCA space, and refine the edge weights between any two cells based on the 
+# shared overlap in their local neighborhoods (Jaccard similarity)  using the FindNeighbors() function by taking as input the previously defined 
+# dimensional of the dataset (first 10 PCs). The KNN approach connects each cell to its nearest neighbors based on their feature similarity.
+# Euclidean distance measures how far apart two cells are. Cells with similar feature expression patterns are closer (i.e. nearest neighbors)
+# Jaccard similarity measures the overlap between the sets of neighbors for two cells and refines the edges by considering not just direct distance but
+# also how many neighbors two cells share (more robust by emphasizing cells that are similar in terms of their local neighborhood)
+pbmc <- FindNeighbors(pbmc, dims = 1:10)
+
+# 6b) To cluster the cells, apply modularity optimization techniques such as the Louvain algorithm to iteratively group cells together, with the 
+# goal of optimizing the standard modularity function. Modularity (0-1) quantifies the strength of division of a network into clusters. High modularity indicates 
+# that cells within clusters have more connections with each other than with cells outside the cluster. Louvain algorithm is used to find clusters of cells by 
+# optimizing modularity. Use the FindClusters() function that contains a resolution parameter that sets the ‘granularity’ of the downstream clustering, with 
+# increased values leading to a greater number of clusters. Values of this parameter between 0.4-1.2 typically returns good results for single-cell datasets of 
+# around 3K cells.Optimal resolution increases for larger datasets
+pbmc <- FindClusters(pbmc, resolution = 0.5)
+
+# Each cell is assigned a cluster ID (cell labels) that can be found using the Idents() function. 
+# Look at cluster IDs of the first 5 cells.
+head(Idents(pbmc), 5)
+
+# 7) Visualize the cell grouping using the famous 2D techniques for scRNAseq experiment, tSNE or UMAP.
+# You can save the object at .rds format so it can be easily loaded back without having to rerun all
+# the above analyses e.g. saveRDS(pbmc, file = "../output/pbmc_tutorial.rds")
+pbmc <- RunUMAP(pbmc, dims = 1:10)
+DimPlot(pbmc, reduction = "umap")
+
+pbmc <- RunTSNE(pbmc, dims = 1:10)
+DimPlot(pbmc, reduction = "tsne")
+
+################################################ FURTHER ANALYSES################################################ 
+
+# Find differentially expressed (DE) features by finding markers that define clusters via differential expression.
+# Use the FindAllMarkers() function that easily automates this process, but one can also test groups of clusters
+# with. each other, or against all cells. Ideally install the "presto" package to dramatically improve the speed of
+# the DE analysis (devtools::install_github("immunogenomics/presto")).
+
+# find all markers of cluster 2 to identify genes that are differentially expressed in cluster 2 compared to all other clusters.
+# ident.1() takes the target cluster one wants to compare. If ident.2() is not included, then the cluster is compared to all the other clusters
+cluster2.markers <- FindMarkers(pbmc, ident.1 = 2)
+head(cluster2.markers, n = 5)
+
+# Find all markers distinguishing cluster 5 from clusters 0 and 3 to Identify genes that are differentially expressed in cluster 5 
+# compared to a combined group of clusters 0 and 3 (here ident.2() is used to define the 0 and 3 clusters)
+cluster5.markers <- FindMarkers(pbmc, ident.1 = 5, ident.2 = c(0, 3))
+head(cluster5.markers, n = 5)
+
+# Cluster identification: find markers for every cluster compared to all remaining cells, to identify genes that are differentially 
+# expressed for every cluster compared to all other cells, focusing on genes with positive log fold changes.
+# logfc.threshold:minimal log2 fold change average expression of the gene compared relative to the average expression of the same gene in the other clusters combined 
+# min.pct:test only those genes that are detected at a minimum fraction of the n number of cells defined between the test populations e.g. detect genes that are detected at 50% frequency of the compared populations (0.1 = default)
+# only.pos = TRUE: returns only the upregulated markers (=FALSE gives the down regulated too)
+# test.use = makes a statistical test (in case one used DESeq2 then the slots="counts" parameter must be inserted since DESeq2 used raw counts)
+pbmc.markers <- FindAllMarkers(pbmc, logfc.threshold = 0.25, min.pct = 0.5, only.pos = TRUE, test.use = "DESeq2", slot = "counts")
+pbmc.markers %>%
+  group_by(cluster) %>%
+  dplyr::filter(avg_log2FC > 1)
+
+# Make a ROC (Receiver Operating Characteristic) is a quantitative measure of how well each gene discriminates between a specific cluster against other clusters. 
+# In the context of single-cell RNA-seq analysis, it helps assess the ability of genes to distinguish between cells in one cluster
+# i.e. measures the performance of genes as markers for a specific cluster. By calculating the Area Under the Curve (AUC) of the ROC curve,
+# one can determine how effectively a gene separates the cluster of interest from the rest. 
+cluster0.markers <- FindMarkers(pbmc, ident.1 = 0, logfc.threshold = 0.25, test.use ="roc", only.pos = TRUE)
+
+# VlnPlot() shows expression probability distributions across clusters (It can also count the raw counts as well
+# using the parameters slot = counts)
+VlnPlot(pbmc, features = c("MS4A1", "CD79A"))
+
+# FeaturePlot() (visualizes feature expression on a tSNE or PCA plot) are our most commonly used visualizations.
+FeaturePlot(pbmc, features = c("MS4A1", "GNLY", "CD3E", "CD14", "FCER1A", "FCGR3A", "LYZ", "PPBP","CD8A"))
+
+# Assigning Cell feature identities to clusters
+new.cluster.ids <- c("Naive CD4 T", "CD14+ Mono", "Memory CD4 T", "B", "CD8 T", "FCGR3A+ Mono","NK","DC", "Platelet")
+names(new.cluster.ids) <- levels(pbmc)
+pbmc <- RenameIdents(pbmc, new.cluster.ids)
+DimPlot(pbmc, reduction = "umap", label = TRUE, pt.size = 0.5) + NoLegend()
